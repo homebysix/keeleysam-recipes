@@ -19,18 +19,10 @@
 from __future__ import absolute_import
 
 import xml.dom.minidom
-from distutils.version import LooseVersion
 
 from autopkglib import Processor, ProcessorError, URLGetter
 
 __all__ = ["ParallelsURLProvider"]
-
-URLS = {
-    "ParallelsDesktop6": "http://update.parallels.com/desktop/v6/en_us/parallels/parallels_updates.xml",
-    "ParallelsDesktop7": "http://update.parallels.com/desktop/v7/parallels/parallels_updates.xml",
-    "ParallelsDesktop8": "http://update.parallels.com/desktop/v8/parallels/parallels_updates.xml",
-    "ParallelsDesktop9": "http://update.parallels.com/desktop/v9/parallels/parallels_updates.xml",
-    "ParallelsDesktop10": "http://update.parallels.com/desktop/v10/parallels/parallels_updates.xml"}
 
 
 class ParallelsURLProvider(URLGetter):
@@ -38,7 +30,7 @@ class ParallelsURLProvider(URLGetter):
     input_variables = {
         "product_name": {
             "required": True,
-            "description": "Product to fetch URL for. One of: %s." % ', '.join(URLS),
+            "description": "Product to fetch URL for. For example: ParallelsDesktop15.",
         },
     }
     output_variables = {
@@ -54,26 +46,52 @@ class ParallelsURLProvider(URLGetter):
     }
     __doc__ = description
 
-    def main(self):
 
-        prod = self.env.get("product_name")
-        if prod not in URLS:
-            raise ProcessorError(
-                "product_name %s is invalid; it must be one of: %s" %
-                (prod, ', '.join(URLS)))
-        url = URLS[prod]
+    def generate_update_feed(self, product_name):
+        '''Given a product name, generate the URL for the appropriate update XML feed.'''
+
+        # Determine and validate major version
         try:
-            manifest_str = self.download(url)
-        except Exception as e:
-            raise ProcessorError(
-                "Unexpected error retrieving product manifest: '%s'" %
-                e)
+            maj_vers = int(product_name.replace('ParallelsDesktop', ''))
+        except (ValueError, TypeError):
+            raise ProcessorError('Invalid product name: %s' % product_name)
+        if not maj_vers:
+            raise ProcessorError('Invalid product name: %s' % product_name)
 
+        # Generate XML feed URL
+        url_template = "http://update.parallels.com/desktop/v%s/parallels/parallels_updates.xml"
+        if maj_vers < 4:
+            raise ProcessorError('Parallels versions less than 4 are not supported.')
+        if maj_vers < 7:
+            update_feed = url_template % (str(maj_vers) + '/en_us')
+        else:
+            update_feed = url_template % str(maj_vers)
+
+        # Validate URL
+        curl_cmd = self.prepare_curl_cmd()
+        curl_cmd.extend(["--head", update_feed])
+        output = self.download_with_curl(curl_cmd)
+        if "200 OK" not in output:
+            raise ProcessorError('Unable to download update feed for %s' % product_name)
+
+        return update_feed
+
+
+    def main(self):
+        '''Main process.'''
+
+        # Determine update feed based on provided product name
+        prod = self.env.get("product_name")
+        update_feed = self.generate_update_feed(prod)
+
+        # Download and parse update feed
+        manifest_str = self.download(update_feed)
         the_xml = xml.dom.minidom.parseString(manifest_str)
         products = the_xml.getElementsByTagName('Product')
+
+        # Iterate through listed products and find 'Parallels Desktop'
         parallels = None
         for a_product in products:
-            # Find the products that are 'Parallels Desktop'
             if a_product.getElementsByTagName(
                     'ProductName')[0].firstChild.nodeValue == u'Parallels Desktop':
                 parallels = a_product
